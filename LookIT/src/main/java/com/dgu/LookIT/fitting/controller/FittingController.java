@@ -25,7 +25,7 @@ public class FittingController {
         return ResponseDto.ok(url);
     }
 
-    // 2. 비동기 방식 - 가상 피팅 요청
+    // 2. 비동기 방식 - 가상 피팅 요청 (Redis Producer)
     @PostMapping("/api/v0/virtual-fitting")
     public ResponseDto<?> requestFitting(
             @UserId Long userId,
@@ -33,10 +33,10 @@ public class FittingController {
             @RequestParam("body") MultipartFile bodyImage
     ) throws IOException {
         s3FileService.processFittingAsync(userId, clothesImage, bodyImage);
-        return ResponseDto.ok("가상 피팅 요청이 처리 완료됐습니다.");
+        return ResponseDto.ok("가상 피팅 요청이 접수되었습니다 (비동기 처리 중)");
     }
 
-    // 동기 방식 - 가상 피팅 요청
+    // 3. 동기 방식 - 가상 피팅 요청 (직접 처리)
     @PostMapping("/api/v0/virtual-fitting/sync")
     public ResponseDto<?> requestFittingSync(
             @UserId Long userId,
@@ -47,19 +47,17 @@ public class FittingController {
         return ResponseDto.ok("가상 피팅 요청이 처리 완료됐습니다.");
     }
 
-    // 3 가상피팅 결과 반환
+    // 4. 가상 피팅 결과 조회
     @GetMapping("/api/v0/virtual-fitting/result")
     public ResponseDto<List<FittingResultResponse>> getFittingResults(@UserId Long userId) {
         List<FittingResultResponse> results = s3FileService.getFittingResults(userId);
         return ResponseDto.ok(results);
     }
 
+    // 5. 가상 피팅 결과 삭제
     @DeleteMapping("/api/v0/virtual-fitting")
     public ResponseDto<?> deleteFitting(@UserId Long userId, @RequestParam Long virutalFittingId) {
-
         String result = s3FileService.deleteVirtualFitting(userId, virutalFittingId);
         return ResponseDto.ok(result);
     }
-
-
 }

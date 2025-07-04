@@ -1,11 +1,11 @@
 package com.dgu.LookIT.fitting.service;
 
-import com.amazonaws.SdkClientException;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.dgu.LookIT.exception.CommonException;
 import com.dgu.LookIT.exception.ErrorCode;
 import com.dgu.LookIT.fitting.domain.VirtualFitting;
+import com.dgu.LookIT.fitting.dto.request.FittingRequestMessage;
 import com.dgu.LookIT.fitting.dto.response.FittingResultResponse;
 import com.dgu.LookIT.fitting.repository.VirtualFittingRepository;
 import com.dgu.LookIT.user.domain.User;
@@ -16,186 +16,141 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.MultipartBodyBuilder;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.io.IOException;
+import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 
 @Slf4j
-@RequiredArgsConstructor
 @Service
+@RequiredArgsConstructor
 public class S3FileService {
-
-    @Value("${cloud.aws.s3.bucket}")
-    private String bucketName;
 
     private final AmazonS3 s3Client;
     private final UserRepository userRepository;
     private final VirtualFittingRepository virtualFittingRepository;
     private final WebClient webClient;
+    private final RedisTemplate<String, String> redisTemplate;
+    private final ObjectMapper objectMapper;
 
-    //사용자 이미지 저장
+    @Value("${cloud.aws.s3.bucket}")
+    private String bucketName;
+
+    private static final String FITTING_QUEUE = "virtual_fitting_queue";
+
+    // 파일 업로드
     public String uploadFile(MultipartFile file) throws IOException {
-        String fileName = generateFileName(file);
-        try {
-            s3Client.putObject(bucketName, fileName, file.getInputStream(), getObjectMetadata(file));
-            return s3Client.getUrl(bucketName, fileName).toString();
-        } catch (SdkClientException e) {
-            throw new IOException("Error uploading file to S3", e);
-        }
-    }
-
-    //AI 이미지 저장
-    public String uploadByteImage(byte[] imageBytes, String fileName) throws IOException {
+        String fileName = UUID.randomUUID().toString() + "-" + file.getOriginalFilename();
         ObjectMetadata metadata = new ObjectMetadata();
-        metadata.setContentLength(imageBytes.length);
-        metadata.setContentType("image/png");
+        metadata.setContentType(file.getContentType());
+        metadata.setContentLength(file.getSize());
 
-        s3Client.putObject(bucketName, fileName, new java.io.ByteArrayInputStream(imageBytes), metadata);
+        s3Client.putObject(bucketName, fileName, file.getInputStream(), metadata);
         return s3Client.getUrl(bucketName, fileName).toString();
     }
 
-    //전체 이미지 조회
-    public List<FittingResultResponse> getFittingResults(Long userId) {
-        return virtualFittingRepository.findAllByUserIdOrderByCreatedAtDesc(userId).stream()
-                .map(FittingResultResponse::from) // record의 정적 메서드 사용
-                .toList();
-    }
-
-
-    @Async
+    // 비동기 요청: Redis 큐에 저장
     public void processFittingAsync(Long userId, MultipartFile clothesImage, MultipartFile bodyImage) {
-        User user = userRepository.findById(userId)
-                .orElseThrow(()-> new CommonException(ErrorCode.NOT_FOUND_USER));
-
-        VirtualFitting fitting = VirtualFitting.builder()
-                .user(user)
-                .build();
-        virtualFittingRepository.save(fitting);  // 1. 먼저 PENDING 상태 저장
-
         try {
-            ByteArrayResource bodyResource = new ByteArrayResource(bodyImage.getBytes()) {
-                @Override public String getFilename() { return bodyImage.getOriginalFilename(); }
-            };
-            ByteArrayResource clothesResource = new ByteArrayResource(clothesImage.getBytes()) {
-                @Override public String getFilename() { return clothesImage.getOriginalFilename(); }
-            };
+            String clothesBase64 = Base64.getEncoder().encodeToString(clothesImage.getBytes());
+            String bodyBase64 = Base64.getEncoder().encodeToString(bodyImage.getBytes());
 
-            MultipartBodyBuilder builder = new MultipartBodyBuilder();
-            builder.part("body", bodyResource)
-                    .filename(bodyImage.getOriginalFilename())
-                    .contentType(MediaType.parseMediaType(bodyImage.getContentType()));
-            builder.part("clothes", clothesResource)
-                    .filename(clothesImage.getOriginalFilename())
-                    .contentType(MediaType.parseMediaType(clothesImage.getContentType()));
+            FittingRequestMessage message = FittingRequestMessage.builder()
+                    .userId(userId)
+                    .clothesImageBase64(clothesBase64)
+                    .bodyImageBase64(bodyBase64)
+                    .build();
 
-            webClient.post()
-                    .uri("/fitting")
-                    .contentType(MediaType.MULTIPART_FORM_DATA)
-                    .bodyValue(builder.build())
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .subscribe(responseStr -> {
-                        try {
-                            ObjectMapper mapper = new ObjectMapper();
-                            JsonNode root = mapper.readTree(responseStr);
-                            String imageUrl = root.path("image").path("url").asText();
+            String json = objectMapper.writeValueAsString(message);
+            redisTemplate.opsForList().leftPush(FITTING_QUEUE, json);
 
-                            fitting.setResultImageUrl(imageUrl);
-                            virtualFittingRepository.save(fitting);  // 3. 성공 시 업데이트
-                            log.info("가상 피팅 성공: {}", imageUrl);
-
-                        } catch (Exception e) {
-                            virtualFittingRepository.delete(fitting);  // 4. 파싱 실패 시 삭제
-                            log.error("JSON 파싱 실패 → 레코드 삭제", e);
-                        }
-                    }, error -> {
-                        virtualFittingRepository.delete(fitting);  // 4. AI 서버 실패 시 삭제
-                        log.error("가상 피팅 요청 실패 → 레코드 삭제", error);
-                    });
-
+            log.info("가상 피팅 요청이 Redis 큐에 저장되었습니다");
         } catch (Exception e) {
-            virtualFittingRepository.delete(fitting);  // 4. 파일 처리 실패 시 삭제
-            log.error("파일 준비 실패 → 레코드 삭제", e);
+            log.error("가상 피팅 요청 큐 저장 실패", e);
         }
     }
 
-    public String deleteVirtualFitting(Long userId, Long fittingId) {
-        User user = userRepository.findById(userId).orElseThrow();
-
-        VirtualFitting virtualFitting = virtualFittingRepository.findById(fittingId)
-                .orElseThrow(() -> new CommonException(ErrorCode.NOT_FOUNT_VIRTUAL_FITTING));
-
-        virtualFittingRepository.delete(virtualFitting);
-        return fittingId + "삭제되었습니다.";
-    }
-
-    public String processFitting(Long userId, MultipartFile clothesImage, MultipartFile bodyImage) {
+    // 동기 요청 처리
+    public String processFitting(Long userId, MultipartFile clothesImage, MultipartFile bodyImage) throws IOException {
+        byte[] clothesBytes = clothesImage.getBytes();
+        byte[] bodyBytes = bodyImage.getBytes();
         try {
-            ByteArrayResource bodyResource = new ByteArrayResource(bodyImage.getBytes()) {
-                @Override public String getFilename() {
-                    return bodyImage.getOriginalFilename();
-                }
-            };
-
-            ByteArrayResource clothesResource = new ByteArrayResource(clothesImage.getBytes()) {
-                @Override public String getFilename() {
-                    return clothesImage.getOriginalFilename();
-                }
-            };
-
-            MultipartBodyBuilder builder = new MultipartBodyBuilder();
-            builder.part("body", bodyResource)
-                    .filename(bodyImage.getOriginalFilename())
-                    .contentType(MediaType.parseMediaType(bodyImage.getContentType()));
-            builder.part("clothes", clothesResource)
-                    .filename(clothesImage.getOriginalFilename())
-                    .contentType(MediaType.parseMediaType(clothesImage.getContentType()));
-
-            String result = webClient.post()
-                    .uri("/fitting")
-                    .contentType(MediaType.MULTIPART_FORM_DATA)
-                    .bodyValue(builder.build())
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block();
-
-            // JSON 파싱
-            ObjectMapper mapper = new ObjectMapper();
-            JsonNode root = mapper.readTree(result);
-            String imageUrl = root.path("image").path("url").asText();
-
-            User user = userRepository.findById(userId).orElseThrow(()-> new CommonException(ErrorCode.NOT_FOUND_USER));
-            // DB 저장
-            VirtualFitting fitting = VirtualFitting.builder()
-                    .user(user)
-                    .resultImageUrl(imageUrl)
-                    .build();
-            virtualFittingRepository.save(fitting);
-
-            return imageUrl;
-
+            return processFittingInternal(userId, clothesBytes, bodyBytes);
         } catch (Exception e) {
-            log.error("가상 피팅 처리 실패", e);
+            log.error("동기 가상 피팅 실패", e);
             return null;
         }
     }
 
+    // Redis Consumer가 호출하는 처리 로직
+    public void processFittingFromQueue(FittingRequestMessage message) {
+        try {
+            byte[] clothesBytes = Base64.getDecoder().decode(message.getClothesImageBase64());
+            byte[] bodyBytes = Base64.getDecoder().decode(message.getBodyImageBase64());
 
-    private ObjectMetadata getObjectMetadata(MultipartFile file) {
-        ObjectMetadata metadata = new ObjectMetadata();
-        metadata.setContentType(file.getContentType());
-        metadata.setContentLength(file.getSize());
-        return metadata;
+            String resultUrl = processFittingInternal(message.getUserId(), clothesBytes, bodyBytes);
+            log.info("가상 피팅 처리 성공: {}", resultUrl);
+
+        } catch (Exception e) {
+            log.error("Queue 기반 가상 피팅 처리 실패", e);
+        }
     }
 
-    private String generateFileName(MultipartFile file) {
-        return UUID.randomUUID().toString() + "-" + file.getOriginalFilename();
+    // 실제 WebClient 호출 및 결과 저장
+    private String processFittingInternal(Long userId, byte[] clothes, byte[] body) throws Exception {
+        ByteArrayResource bodyRes = new ByteArrayResource(body) {
+            @Override public String getFilename() { return "body.png"; }
+        };
+        ByteArrayResource clothesRes = new ByteArrayResource(clothes) {
+            @Override public String getFilename() { return "clothes.png"; }
+        };
+
+        MultipartBodyBuilder builder = new MultipartBodyBuilder();
+        builder.part("body", bodyRes).filename("body.png").contentType(MediaType.IMAGE_PNG);
+        builder.part("clothes", clothesRes).filename("clothes.png").contentType(MediaType.IMAGE_PNG);
+
+        String result = webClient.post()
+                .uri("/fitting")
+                .contentType(MediaType.MULTIPART_FORM_DATA)
+                .bodyValue(builder.build())
+                .retrieve()
+                .bodyToMono(String.class)
+                .block();
+
+        JsonNode root = objectMapper.readTree(result);
+        String imageUrl = root.path("image").path("url").asText();
+
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new CommonException(ErrorCode.NOT_FOUND_USER));
+
+        VirtualFitting fitting = VirtualFitting.builder()
+                .user(user)
+                .resultImageUrl(imageUrl)
+                .build();
+
+        virtualFittingRepository.save(fitting);
+        return imageUrl;
+    }
+
+    // 결과 조회
+    public List<FittingResultResponse> getFittingResults(Long userId) {
+        return virtualFittingRepository.findAllByUserIdOrderByCreatedAtDesc(userId).stream()
+                .map(FittingResultResponse::from)
+                .toList();
+    }
+
+    // 결과 삭제
+    public String deleteVirtualFitting(Long userId, Long fittingId) {
+        VirtualFitting vf = virtualFittingRepository.findById(fittingId)
+                .orElseThrow(() -> new CommonException(ErrorCode.NOT_FOUNT_VIRTUAL_FITTING));
+        virtualFittingRepository.delete(vf);
+        return "삭제 완료: " + fittingId;
     }
 }
