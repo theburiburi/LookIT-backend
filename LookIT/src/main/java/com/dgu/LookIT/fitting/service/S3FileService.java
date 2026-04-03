@@ -8,6 +8,7 @@ import com.dgu.LookIT.fitting.domain.VirtualFitting;
 import com.dgu.LookIT.fitting.dto.request.FittingRequestMessage;
 import com.dgu.LookIT.fitting.dto.response.FittingResultResponse;
 import com.dgu.LookIT.fitting.repository.VirtualFittingRepository;
+import com.dgu.LookIT.global.constant.RedisKeyConstants;
 import com.dgu.LookIT.user.domain.User;
 import com.dgu.LookIT.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -43,7 +44,7 @@ public class S3FileService {
     @Value("${cloud.aws.s3.bucket}")
     private String bucketName;
 
-    private static final String FITTING_QUEUE = "virtual_fitting_queue";
+    private static final String FITTING_QUEUE = RedisKeyConstants.FITTING_QUEUE;
 
     // 파일 업로드
     public String uploadFile(MultipartFile file) throws IOException {
@@ -149,7 +150,10 @@ public class S3FileService {
     // 결과 삭제
     public String deleteVirtualFitting(Long userId, Long fittingId) {
         VirtualFitting vf = virtualFittingRepository.findById(fittingId)
-                .orElseThrow(() -> new CommonException(ErrorCode.NOT_FOUNT_VIRTUAL_FITTING));
+                .orElseThrow(() -> new CommonException(ErrorCode.NOT_FOUND_VIRTUAL_FITTING));
+        if (!vf.getUser().getId().equals(userId)) {
+            throw new CommonException(ErrorCode.FORBIDDEN_ROLE);
+        }
         virtualFittingRepository.delete(vf);
         return "삭제 완료: " + fittingId;
     }

@@ -1,7 +1,7 @@
 package com.dgu.LookIT.fitting.service;
 
 import com.dgu.LookIT.fitting.dto.request.FittingRequestMessage;
-import com.dgu.LookIT.fitting.service.S3FileService;
+import com.dgu.LookIT.global.constant.RedisKeyConstants;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -19,15 +19,13 @@ public class FittingConsumer {
     private final ObjectMapper objectMapper;
     private final S3FileService s3FileService;
 
-    private static final String FITTING_QUEUE = "virtual_fitting_queue";
-
     @PostConstruct
     public void startConsumer() {
-        new Thread(() -> {
+        Thread thread = new Thread(() -> {
             while (true) {
                 try {
                     String json = redisTemplate.opsForList()
-                            .rightPop(FITTING_QUEUE, 60, TimeUnit.SECONDS);
+                            .rightPop(RedisKeyConstants.FITTING_QUEUE, 60, TimeUnit.SECONDS);
 
                     if (json != null) {
                         FittingRequestMessage message = objectMapper.readValue(json, FittingRequestMessage.class);
@@ -37,7 +35,10 @@ public class FittingConsumer {
                     log.error("Consumer 처리 중 예외 발생", e);
                 }
             }
-        }).start();
+        });
+        thread.setName("fitting-queue-consumer");
+        thread.setDaemon(true);
+        thread.start();
     }
 
 }
