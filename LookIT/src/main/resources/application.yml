@@ -31,6 +31,10 @@ spring:
     base_url: https://dapi.kakao.com
     redirect_uri: https://lookit-pearl.vercel.app/auth/kakao/callback
 
+fitting:
+  queue:
+    consumer-timeout-seconds: 60
+
 logging:
   level:
     io.netty: DEBUG

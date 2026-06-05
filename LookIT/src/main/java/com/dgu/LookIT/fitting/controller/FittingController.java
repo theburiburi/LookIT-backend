@@ -2,6 +2,7 @@ package com.dgu.LookIT.fitting.controller;
 
 import com.dgu.LookIT.annotaion.UserId;
 import com.dgu.LookIT.fitting.dto.response.FittingResultResponse;
+import com.dgu.LookIT.fitting.service.FittingQueueProducer;
 import com.dgu.LookIT.fitting.service.S3FileService;
 import com.dgu.LookIT.global.ResponseDto;
 import lombok.RequiredArgsConstructor;
@@ -16,6 +17,7 @@ import java.util.List;
 public class FittingController {
 
     private final S3FileService s3FileService;
+    private final FittingQueueProducer fittingQueueProducer;
 
     // 1. 일반 파일 업로드
     @PostMapping("/upload")
@@ -30,8 +32,8 @@ public class FittingController {
             @UserId Long userId,
             @RequestParam("clothes") MultipartFile clothesImage,
             @RequestParam("body") MultipartFile bodyImage
-    ) throws IOException {
-        s3FileService.processFittingAsync(userId, clothesImage, bodyImage);
+    ) {
+        fittingQueueProducer.enqueue(userId, clothesImage, bodyImage);
         return ResponseDto.ok("가상 피팅 요청이 접수되었습니다 (비동기 처리 중)");
     }
 
